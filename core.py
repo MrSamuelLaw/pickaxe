@@ -1,9 +1,13 @@
 from __future__ import print_function
 import copy
 from inspect import isclass
-from types import Any
+from fwave.jydantic.types import Any
 
 
+"""
+Author: Samuel Law
+Description: Module that contains the core functionality for jydantic
+"""
 
 # --------------- LOGGER ---------------
 JYDANTIC_LOGGER = system.util.getLogger('jydantic')
@@ -175,7 +179,7 @@ def configDict(**kwargs):
 	
 	defaults = {
 		'strict': False,				  # if true, types must match exactly rather than being coerced
-		'validateAssignment': True,  	  # if true, revalidates the fields on assignment
+		'validateAssignment': True,  	  # if true, _validateModels the fields on assignment
 		'extraFields': 'FORBID',		  # options are ALLOW, IGNORE, & FORBID, defaults to IGNORE
  
 	}
@@ -416,7 +420,7 @@ class BaseModel(object):
 		self._setWithoutSideEffects('__jydantic_complete__', True)
 				
 		if self.__validate_data__:
-			self.revalidate()
+			self._validateModel()
 			
 		self._setWithoutSideEffects('__validate_data__', self._config_dict_['validateAssignment'])
 		
@@ -500,12 +504,12 @@ class BaseModel(object):
 		if isinstance(field, (Field, ComputedField)):
 			self._setFieldValue(name, field, value)
 				
-		# revalidate the model
+		# _validateModel the model
 		if self.__jydantic_complete__ and self.__validate_data__:
-			self.revalidate()
+			self._validateModel()
 				
-	def revalidate(self):
-		"""Revalidates the model"""
+	def _validateModel(self):
+		"""_validateModels the model"""
 		for mv in self.__model_validators__:
 			try:
 				mv(self)
@@ -545,7 +549,4 @@ class BaseModel(object):
 				alias = key if computed_field.alias is None else computed_field.alias
 				dump[alias] = getattr(self, key)
 		return dump
-		
-		
-		
 		

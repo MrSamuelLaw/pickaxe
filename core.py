@@ -1,7 +1,7 @@
 from __future__ import print_function
 import copy
 from inspect import isclass
-from fwave.jydantic.types import Any
+from jydantic.types import Any
 
 
 """

@@ -4,8 +4,8 @@ from functools import partial
 from java.lang import Integer, String
 from java.util import Date
 from com.inductiveautomation.ignition.common import BasicDataset
-from fwave.jydantic.core import BaseModel, Field, ValidationError, ModelInitError, FrozenError
-from fwave.jydantic.core import fieldValidator, computedField, modelValidator, configDict
+from jydantic.core import BaseModel, Field, ValidationError, ModelInitError, FrozenError
+from jydantic.core import fieldValidator, computedField, modelValidator, configDict
 
 
 class TestBaseModel(unittest.TestCase):
@@ -383,7 +383,7 @@ class TestModelValidator(unittest.TestCase):
 		
 		
 def runTests():
-	fwave.testing.testing_utils.runTests(
+	testing.testing_utils.runTests(
 		TestBaseModel,
 		TestFields,
 		TestComputedFields,

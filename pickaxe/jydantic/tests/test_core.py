@@ -383,7 +383,7 @@ class TestModelValidator(unittest.TestCase):
 		
 		
 def runTests():
-	testing.testing_utils.runTests(
+	testing.utils.runTests(
 		TestBaseModel,
 		TestFields,
 		TestComputedFields,

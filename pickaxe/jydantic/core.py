@@ -1,16 +1,14 @@
 from __future__ import print_function
 import copy
+import functools
 from inspect import isclass
-from jydantic.types import Any
+from pickaxe.jydantic.types import (Any, 
+									TypeCheckerRegistry,
+									TypeConverterRegistry)
 
-
-"""
-Author: Samuel Law
-Description: Module that contains the core functionality for jydantic
-"""
 
 # --------------- LOGGER ---------------
-JYDANTIC_LOGGER = system.util.getLogger('jydantic')
+LOGGER = system.util.getLogger('jydantic')
 
 
 # --------------- EXCEPTIONS ---------------
@@ -59,7 +57,6 @@ class FrozenError(Exception):
 	"""
 	pass
 
-
 # --------------- DECORATORS ---------------
 
 class classProperty(property):
@@ -98,16 +95,19 @@ def fieldValidator(*names):
 		['error setting field pk to 0 with the following error: pk cannot equal zero']
 	"""
 	def wrapper(classMethod):
-		def wrapped(clsOrInstance, *args, **kwargs):
+		# note, we have to wrap it as classmethod does not support
+		# dynamic attibute assignment, such as field names
+		@functools.wraps(classMethod.__func__)
+		def fieldValidator(clsOrInstance, *args, **kwargs):
 			params = (None, clsOrInstance) if isclass(clsOrInstance) else (clsOrInstance, )
 			return classMethod.__get__(*params)(*args, **kwargs)
-		wrapped.__field_names__ = names
-		newClassMethod = classmethod(wrapped)
+		fieldValidator.__field_names__ = names
+		newClassMethod = classmethod(fieldValidator)
 		return newClassMethod
 	return wrapper
 
 	
-def computedField(frozen=False, exclude=False, alias=None):
+def computedField(frozen=False, exclude=False, serializationAlias=None):
 	"""This method marks a function wrapped with a property
 	as a field of the object so validation and freezing can
 	occure.
@@ -133,7 +133,7 @@ def computedField(frozen=False, exclude=False, alias=None):
 			fget.__computed_field__ = True
 			fget.__frozen__ = frozen
 			fget.__exclude__ = exclude
-			fget.__alias__ = alias
+			fget.__serializationAlias__ = serializationAlias
 			return propertyMethod
 		except AttributeError as e:
 			raise AttributeError('computedField must wrap a function decorated with a property.')
@@ -182,6 +182,7 @@ def configDict(**kwargs):
 		'validateAssignment': True,  	  # if true, _validateModels the fields on assignment
 		'extraFields': 'FORBID',		  # options are ALLOW, IGNORE, & FORBID, defaults to IGNORE
  
+		'frozen': False,				  # option to freeze the model
 	}
 	defaults.update(kwargs)
 	return defaults
@@ -192,56 +193,66 @@ def configDict(**kwargs):
 class Field(object):
 	"""Object that defines a field on a base model.
 	Args:
-		typeObj, field type, for example int, can also be a class
+		type_: <T>, field type, for example int, can also be a class
+		typeConverter=None, callable that takes a value and returns a converted value
 		defaultValue=None, value the field will default to if not provided
 		allowNone=False, if true allows the field to be None, i.e. makes a field optional
 		frozen=False, frozen, freezes the field from changes
-		alias=None, name that the field will have when the model is dumped
+		readonly=False, causes the frozen bit to be set automatically once the field is set to a non-null value
+		alias=None, name that the field is created from when parsing datadata and when the model is dumped
+		validationAlias=None, name the field will be created from when parsing data
+		serializationAlias=None, name the field will have when dumping the model
 		exclude=False, if true excludes the field when the model is dumped
 		strict=False, if true prevents type coercion
-	
 	Example:
 		class Foo(BaseModel):
 			... your code here
 			name = Field(str)
-			alias = Field(str, allowNone=True)
+			type = Field(str, allowNone=True, alias='_type')
 			...
 			
 		foo1 = Foo(name='bar')
-		foo2 = Foo(name='bar', alias='baz')
+		foo2 = Foo(name='bar', _type='baz')  # used alias for _type
 	"""
 	
 	def __init__(self, 
-				 typeObj, 			 # field type, for example int, can also be a class
-				 defaultValue=None,  # value the field will default to if not provided
-				 allowNone=False,    # if true allows the field to be None, i.e. makes a field optional
-				 frozen=False, 		 # frozen, freezes the field from changes
-				 alias=None, 		 # name that the field will have when the model is dumped
-				 exclude=False, 	 # if true excludes the field when the model is dumped
-				 strict=False		 # if true prevents type coercion
+				 type_, 			 		# field type, for example int, can also be a class
+				 typeConverter=None,		# converter that attempts to convert incoming data to the field type
+				 defaultValue=None,  		# value the field will default to if not provided
+				 allowNone=False,    		# if true allows the field to be None, i.e. makes a field optional
+				 frozen=False, 		 		# frozen, freezes the field from changes
+				 readonly=False,			# like frozen, but locks in the first non-null value
+				 alias=None, 		 		# name that the field is created from when parsing datadata and when the model is dumped
+				 validationAlias=None,  	# name the field will be created from when parsing data
+				 serializationAlias=None, 	# name the field will have when dumping the model
+				 exclude=False, 	 		# if true excludes the field when the model is dumped
+				 strict=False		 		# if true prevents type coercion
 				 ):
-		self.typeObj = typeObj
+		self.type = type_
+		self.typeConverter = typeConverter
 		self.defaultValue = defaultValue
 		self.allowNone = allowNone
 		self.frozen = frozen
-		self.alias = alias
+		self.readonly = readonly
 		self.exclude = exclude
 		self.strict = strict
-
-
+		self.validationAlias = alias or validationAlias
+		self.serializationAlias = alias or serializationAlias
+		
+		
 class ComputedField(object):
 	"""Object that defines a computed field on a base model.
 	Args:
 		frozen=False, frozen, freezes the field from changes
-		alias=None, name that the field will have when the model is dumped
+		serializationAlias=None, name the field will have when dumping the model
 		exclude=False, if true excludes the field when the model is dumped
-	
+		
 	Example:
 		class Foo(BaseModel):
 			... your code here
 			name = Field(str)
 			
-			@computedField(alias='long_name')
+			@computedField(serializationAlias='long_name')
 			@property
 			def longName(self):
 				return self.name + '_ofClassFoo'
@@ -253,15 +264,14 @@ class ComputedField(object):
 			bar_ofClassFoo
 	"""
 	
-	def __init__(self, frozen=False, exclude=False, alias=None):
+	def __init__(self, frozen=False, exclude=False, serializationAlias=None):
 		self.frozen = frozen
-		self.alias = alias
+		self.serializationAlias = serializationAlias
 		self.exclude = exclude
 
 
-class BaseModelMetaclass(type):
+class BaseModelMeta(type):
 	"""This class implemnts the magic that users experience when using BaseModel"""
-
 
 	def __init__(cls, *args, **kwargs):
 		"""This performs additional setup when the class is defined."""
@@ -286,8 +296,8 @@ class BaseModelMetaclass(type):
 				key = str(obj.fget.__name__)
 				frozen = obj.fget.__frozen__
 				exclude = obj.fget.__exclude__
-				alias = obj.fget.__alias__
-				cls.__computed_fields__[key] = ComputedField(frozen, exclude, alias)
+				serializationAlias = obj.fget.__serializationAlias__
+				cls.__computed_fields__[key] = ComputedField(frozen, exclude, serializationAlias)
 			elif obj == Field:
 				error = ValueError('Fields must be instantiated, for example x = Field(int) not x = Field')
 				exceptions.append(error)
@@ -302,14 +312,34 @@ class BaseModelMetaclass(type):
 			if type(obj) == classmethod and  hasattr(obj.__func__, '__field_names__'):
 				for name in obj.__func__.__field_names__:
 					if name in cls.__field_validators__.keys():
-						cls.__field_validators__[name].add(obj)
+						cls.__field_validators__[name].add(obj.__func__.__name__)
 					else:
-						cls.__field_validators__[name] = {obj}
+						cls.__field_validators__[name] = {obj.__func__.__name__}
 			elif hasattr(obj, '__model_validator__'):
-				cls.__model_validators__.add(obj)
+				cls.__model_validators__.add(obj.__name__)
 		
 		if exceptions:
 			raise ModelInitError('Failed to initialize model with the following exceptions:', exceptions)
+			
+			
+# define the type checking & converting
+@TypeCheckerRegistry.registerForType(BaseModelMeta)
+def baseModelValueTypeChecker(registry, model, value, strict):
+	if not strict:
+		return isinstance(value, model)
+	else:
+		return type(value) == model
+
+@TypeConverterRegistry.registerForType(BaseModelMeta)
+def baseModelValueTypeConverter(registry, model, value):
+	if isinstance(value, dict):
+		return model(**value)
+	elif isinstance(type(value), BaseModelMeta):
+		return model(**value.modelDump())
+	else:
+		msg = 'Cannot convert value = {} of type {} to type {}'
+		msg = msg.format(value, type(value), model)
+		raise TypeError(msg)		
 
 
 class BaseModel(object):
@@ -356,53 +386,60 @@ class BaseModel(object):
 		['error setting field serial to a1234 with the following error: serial format is incorrect']
 	"""
 	
-	__metaclass__ = BaseModelMetaclass
+	__metaclass__ = BaseModelMeta
 	__fields__ = {}
 				  # fields that the model has
 	__computed_fields__ = {}
 	  # computed fields that the model has
 	__field_validators__ = {}
-	  # validators for fields (works with computed as well)
-	__model_validators__ = set()
-  # validators for the model
+	  # validators names for fields (works with computed as well)
+	__model_validators__ = set()  # validators names for the model
 	_config_dict_ = configDict()
   # config for the model
 	
 	def __init__(self, **data):
-		"""This performs additional setup when an instance of a class is created"""
+		"""Creates an instance of a model class with validation.
+		"""
 		if type(self) == BaseModel:
 			raise NotImplementedError('Cannot instantiate BaseModel directly.')
+		super(BaseModel, self).__init__(**data)
 		self._setWithoutSideEffects('__validate_data__', True)
 		self._modelConstruct(**data)
 		
 	@classmethod
 	def modelConstruct(cls, **data):
-		"""Creates a new model without validation"""
+		"""Creates a new model without validation.
+		"""
 		# clone the class fields into the instance so it has an independent copy
 		self = object.__new__(cls)
 		self._setWithoutSideEffects('__validate_data__', False)
 		self._modelConstruct(**data)
 		return self
-		
+	
 	def _setWithoutSideEffects(self, name, value):
-		"""Sets a model attribute without causing validation"""
+		"""Sets a model attribute without causing validation.
+		"""
 		object.__setattr__(self, name, value)
-		
+	
 	def _modelConstruct(self, **data):
 		# needed for processing
 		self._setWithoutSideEffects('__jydantic_complete__', False)
 		
 		# setup the fields
 		self._setWithoutSideEffects('__fields__', copy.deepcopy(self.__fields__))
-		for key, obj in type(self).__dict__.items():
-			if isinstance(obj, Field):
-				field = copy.deepcopy(obj)
-				self.__fields__[key] = field
-				setattr(self, key, data.get(key, field.defaultValue))
+		self._setWithoutSideEffects('_config_dict_', copy.deepcopy(self._config_dict_))
+		fields = dict(self.__fields__)
+		fields.update({key: obj for key, obj in type(self).__dict__.items() if isinstance(obj, Field)})
+		for key, obj in fields.items():
+			field = copy.deepcopy(obj)
+			self.__fields__[key] = field
+			value = data.get(field.validationAlias or key, field.defaultValue)
+			setattr(self, key, value)
 		
 		# read in any extra fields
 		extraFields = self._config_dict_['extraFields']
-		diff = {key for key in data.keys() if key not in set(self.__fields__.keys())}
+		expectedKeys = {f.validationAlias or k for k, f in self.__fields__.items()}
+		diff = {key for key in data.keys() if key not in expectedKeys}
 		if diff:
 			if extraFields == 'FORBID':
 				msg = 'cannot create defaults field for {}, extra fields forbidden'.format(diff)
@@ -438,61 +475,52 @@ class BaseModel(object):
 		elif extraFields == 'IGNORE':
 			raise AttributeError('{} has no field {}'.format(type(self).__name__, name))
 		elif extraFields == 'ALLOW':
-			if isinstance(value, (Field, ComputedField)):
-				value = value.value
-			else:
-				field = Field(Any)
-				self.__fields__[name] = field
-				self._setWithoutSideEffects(name, value)
+			field = Field(Any, allowNone=True)
+			self.__fields__[name] = field
+			self._setWithoutSideEffects(name, value)
 		else:
 			msg = "_config_dict_['extraFields'] must be literal 'FORBID' | 'ALLOW' | 'IGNORE' not {}"
 			msg = msg.format(extraFields)
 			raise ValueError(msg)
 			
-	def _validateFieldValue(self, name, field, value):
-		# handle field
-		if isinstance(field, Field):
-			# handle None values
-			if value is None:
-				if not field.allowNone:
-					raise ValueError('cannot set field {} to None'.format(name))
-				# we use this as an excape hatch to break out of the upper if statement
-				else:
-					pass
-			# handle strict modes
-			elif ((self._config_dict_['strict'] or field.strict) 
-					and (type(field.typeObj) != Any) and (type(value) != field.typeObj)):
-				msg = 'Value {} of type {} does not match field type {}'
-				msg = msg.format(value, type(value), field.typeObj)
-				raise TypeError(msg)
-			# try to coerce the type of the value
-			else:
-				if not isinstance(value, (field.typeObj, Any)):
-					try:
-						value = field.typeObj(value)
-					except:
-						msg = 'Could not cast {} to type {}'
-						msg = msg.format(value, field.typeObj)
-						raise TypeError(msg)
-						
-		# run the user defined validators
+	def _ensureFieldValue(self, name, field, value):
 		if self.__validate_data__:
-			for func in self.__field_validators__.get(name, set()):
-				func.__get__(self)(value)
-				
-		# if no errors raised, return the value
+			if isinstance(field, Field):
+				if value is None:
+					if not field.allowNone:
+						raise ValueError('cannot set field {} to None'.format(name))
+				elif field.type is not Any:
+					strict = self._config_dict_['strict'] or field.strict
+					checker = TypeCheckerRegistry.getTypeChecker(field.type)
+					if not checker(value, strict):
+						if not strict:
+							converter = field.typeConverter or TypeConverterRegistry.getTypeConverter(field.type)
+							value = converter(value)
+							if not checker(value, strict):
+								msg = 'Could not convert data type for value = {} of type {} for field {} of type {}'
+								msg = msg.format(value, type(value), name, field.type)
+								raise TypeError(msg)
+						else:
+							msg = 'Incorrect data type for value = {} or type {} for field {} of type {}'
+							msg = msg.format(value, type(value), name, field.type)
+							raise TypeError(msg)
+			
+			# this allows models to have validators 
+			for funcName in self.__field_validators__.get(name, set()):
+				getattr(self, funcName)(value)
+			
 		return value
 			
 	def _setFieldValue(self, name, field, value):
 		# check if frozen
-		if bool(field.frozen) and self.__jydantic_complete__:
-			raise FrozenError('cannot set field {}, it is frozen'.format(field.alias))
-		
-		# raises error if not valid
-		if self.__validate_data__:
-			value = self._validateFieldValue(name, field, value)
-			
+		if (bool(field.frozen) or self._config_dict_['frozen']) and self.__jydantic_complete__:
+			raise FrozenError('cannot set field {}, it is frozen/readonly'.format(name))
+		value = self._ensureFieldValue(name, field, value)	
 		self._setWithoutSideEffects(name, value)
+		
+		# latch the frozen bit if readonly
+		if getattr(field, 'readonly', False) and (value is not None):
+			field.frozen = True
 		
 	def __setattr__(self, name, value):
 		# handle non-field values
@@ -510,9 +538,10 @@ class BaseModel(object):
 				
 	def _validateModel(self):
 		"""_validateModels the model"""
-		for mv in self.__model_validators__:
+		for name in self.__model_validators__:
 			try:
-				mv(self)
+				mv = getattr(self, name)
+				mv()  # self is implicitly bound to the function call already
 			except RuntimeError as e:
 				if 'recursion' in e.message.lower():
 					msg = '{}, make sure not to set model values inside of a modelValidator'
@@ -521,6 +550,28 @@ class BaseModel(object):
 				else:
 					raise e
 	
+	def update(self, other):
+		# convert model to dict if needed
+		if isinstance(other, BaseModel):
+			other = {k: getattr(other, k, None) for k in other.__fields__.keys()}
+		elif type(other) != dict:
+			msg = 'Can only update from dict or subclass of BaseModel, not {}'
+			msg = msg.format(other)
+			raise TypeError(msg)
+		
+		# save config
+		validateData = self.__validate_data__
+		
+		# apply the changes with __validate_data__ off to defer modelValidator
+		# note that only fields where the values don't match are updated
+		self.__validate_data__ = False
+		[setattr(self, k, v) for k, v in other.items() if getattr(self, k, None) != v]
+		
+		# re-apply config and run modelValidators if necessary
+		self.__validate_data__ = validateData
+		if self.__validate_data__:
+			self._validateModel()
+		
 	@classProperty
 	def modelFields(instanceOrCls):
 		"""Returns a copy of the fields for this class/instance""" 
@@ -531,22 +582,44 @@ class BaseModel(object):
 		"""Returns a copy of the computed fields for this class"""
 		return copy.copy(instanceOrCls.__computed_fields__)
 	
-	def modelDump(self):
-		"""Converts the model to a dictionary recurrsively"""
+	def modelDump(self, byAlias=False, excludeNone=False, serializers={}):
+		"""Converts the model to a dictionary recurrsively
+		Args:
+			byAlias: bool, defaults to false, flag indicating if fields should be dumped using serialization alias, more field name.
+			excludeNone: bool, default to false, flag indicating if only fields with a non-None value should be dumped.
+		"""
+		dumpParams = dict(
+			byAlias=byAlias,
+			excludeNone=excludeNone,
+		)
 		dump = {}
+		fields = self.__fields__
+		fields.update(self.__computed_fields__)
+		
 		# collect the model fields
-		for key, field in self.__fields__.items():
-			if not field.exclude:
-				alias = key if field.alias is None else field.alias
+		for key, field in fields.items():
+			if (not field.exclude):
+				alias = field.serializationAlias or key if byAlias else key
 				value = getattr(self, key)
-				if isinstance(value, BaseModel):
-					dump[alias] =  value.model_dump()
-				else:
+				serializer = serializers.get(key)
+				if (value is not None) or (not excludeNone):
+					if isinstance(value, BaseModel):
+						if isinstance(serializer, (dict, type(None))):
+							_dumpParams = {}
+							_dumpParams.update(dumpParams)
+							_dumpParams['serializers'] = serializer or {}
+							value = value.modelDump(**_dumpParams)
+						else:
+							value = serializer(value)
+					elif serializer is not None:
+						value = serializer(value)
+					elif hasattr(value, '__iter__'):
+						if not isinstance(value, dict):
+							value = [v.modelDump(**dumpParams) if isinstance(v, BaseModel) else v for v in value]
+						else:
+							value = {k.modelDump(**dumpParams) if isinstance(k, BaseModel) else k: 
+									v.modelDump(**dumpParams) if isinstance(v, BaseModel) else v 
+									for k, v in value.items()}
 					dump[alias] = value
-		# collect the computed fields
-		for key, computed_field in self.__computed_fields__.items():
-			if not computed_field.exclude:
-				alias = key if computed_field.alias is None else computed_field.alias
-				dump[alias] = getattr(self, key)
 		return dump
 		
